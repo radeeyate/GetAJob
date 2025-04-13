@@ -1,0 +1,4 @@
+kick-time: 1
+kick-message: "Seriously? 1 minute already? Don't you have anything better to do, like... getting a job? (unless you already have one? sorry.)"
+kick-broadcast: "{player} has spent 1 minute(s) on the server today. If they don't have a job, have them get one. Shame!"
+kick-ignore-users: ["00000000-0000-0000-0000-000000000000"] # get this from an actual user
