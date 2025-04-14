@@ -16,6 +16,7 @@ import java.sql.SQLException
 import java.util.*
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.abs
 
 data class KickConfig(
     val kickTime: Long,
@@ -24,8 +25,15 @@ data class KickConfig(
     val kickIgnoreUsers: List<String>
 )
 
+data class Coords(
+    val x: Double,
+    val y: Double,
+)
+
 class GetAJob : JavaPlugin(), CommandExecutor, Listener {
     val playtime: MutableMap<UUID, Long> = ConcurrentHashMap()
+    var coords: MutableMap<UUID, Coords> = ConcurrentHashMap()
+
     private var connection: Connection? = null
 
     private fun getDatabaseFile(): File {
@@ -113,17 +121,34 @@ class GetAJob : JavaPlugin(), CommandExecutor, Listener {
 
         Bukkit.getScheduler().runTaskTimerAsynchronously(this, Runnable {
             server.onlinePlayers.forEach { player ->
-                playtime.compute(player.uniqueId) { _, currentTime ->
+                val uuid = player.uniqueId
+                val loc = player.location
+                val x = loc.x
+                val y = loc.y
+
+                if (coords.contains(uuid)) {
+                    if (abs(coords[uuid]?.x?.minus(x) ?: 0.0) > 5 || abs(coords[uuid]?.y?.minus(y) ?: 0.0) > 5) {
+                        coords[uuid] = Coords(x, y)
+                    } else {
+                        logger.info("player $uuid is likely afk; not adding time.")
+                        return@forEach
+                        coords[uuid] = Coords(x, y)
+                    }
+                } else {
+                    coords[uuid] = Coords(x, y)
+                }
+
+                playtime.compute(uuid) { _, currentTime ->
                     (currentTime ?: 0L) + 1200L
                 }
 
-                val playtimePastSessionsToday = getPlaytimePastSessionsToday(player.uniqueId)
+                val playtimePastSessionsToday = getPlaytimePastSessionsToday(uuid)
 
-                val playtimeToday = (playtime[player.uniqueId]?.plus(playtimePastSessionsToday * 1200L))?.div(1200L)
+                val playtimeToday = (playtime[uuid]?.plus(playtimePastSessionsToday * 1200L))?.div(1200L)
                 if (playtimeToday != null) {
                     val kickConfig = getKickConfig()
                     if (!kickConfig.kickIgnoreUsers.contains(player.uniqueId.toString())) {
-                        if (playtimeToday > kickConfig.kickTime) {
+                        if (playtimeToday >= kickConfig.kickTime) {
                             Bukkit.getScheduler().runTask(this, Runnable {
                                 if (player.isOnline) {
                                     player.kickPlayer(kickConfig.kickMessage)
@@ -134,7 +159,7 @@ class GetAJob : JavaPlugin(), CommandExecutor, Listener {
                     }
                 }
 
-                logger.info("${player.uniqueId} has played for $playtimeToday minutes today.")
+                logger.info("$uuid has played for $playtimeToday minute(s) today.")
             }
         }, 0L, 1200L)
 
@@ -148,10 +173,10 @@ class GetAJob : JavaPlugin(), CommandExecutor, Listener {
             ).use { preparedStatement ->
                 preparedStatement?.setString(1, uuid.toString())
                 val resultSet = preparedStatement?.executeQuery()
-                if (resultSet?.next() == true) {
-                    return resultSet.getLong(1)
+                return if (resultSet?.next() == true) {
+                    resultSet.getLong(1)
                 } else {
-                    return 0L
+                    0L
                 }
             }
         } catch (e: SQLException) {
@@ -218,7 +243,7 @@ class GetAJob : JavaPlugin(), CommandExecutor, Listener {
             label: String,
             args: Array<out String?>
         ): Boolean {
-            val player = if (sender is org.bukkit.entity.Player) sender else null
+            val player = sender as? org.bukkit.entity.Player
             if (player != null) {
                 val time = plugin.playtime[player.uniqueId] ?: 0L
                 val minutes = time / 1200L
@@ -238,7 +263,7 @@ class GetAJob : JavaPlugin(), CommandExecutor, Listener {
             label: String,
             args: Array<out String?>
         ): Boolean {
-            val player = if (sender is org.bukkit.entity.Player) sender else null
+            val player = sender as? org.bukkit.entity.Player
             if (player != null) {
                 val message = plugin.generateTodaySummarization()
                 sender.sendMessage(message)
@@ -270,7 +295,7 @@ class GetAJob : JavaPlugin(), CommandExecutor, Listener {
 
             val kickConfig = getKickConfig()
             if (!kickConfig.kickIgnoreUsers.contains(player.uniqueId.toString())) {
-                if (playtimeToday > kickConfig.kickTime) {
+                if (playtimeToday >= kickConfig.kickTime) {
                     Bukkit.getScheduler().runTask(this, Runnable {
                         if (player.isOnline) {
                             player.kickPlayer(kickConfig.kickMessage)
@@ -312,6 +337,29 @@ class GetAJob : JavaPlugin(), CommandExecutor, Listener {
 
     override fun onDisable() {
         Bukkit.getScheduler().cancelTasks(this)
+        server.onlinePlayers.forEach { player ->
+            val time = (playtime.remove(player.uniqueId) ?: 0L) / 1200L
+            if (time < 1L) {
+                return@forEach
+            }
+
+            logger.info("saving playtime for ${player.uniqueId}: $time minute(s)")
+
+            try {
+                connection?.prepareStatement(
+                    "INSERT INTO playtime (uuid, length) VALUES (?, ?)"
+                ).use { preparedStatement ->
+                    preparedStatement?.setString(1, player.uniqueId.toString())
+                    preparedStatement?.setLong(2, time)
+                    preparedStatement?.executeUpdate()
+
+                    logger.info("saved playtime for ${player.uniqueId}: $time minute(s)")
+                }
+            } catch (e: SQLException) {
+                logger.severe("failed to save playtime for ${player.uniqueId}: ${e.message}")
+            }
+        }
+
         closeDatabaseConnection()
         logger.info("${description.name} disabled.")
     }
